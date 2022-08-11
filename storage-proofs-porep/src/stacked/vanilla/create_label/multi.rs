@@ -1,9 +1,10 @@
 use std::convert::TryInto;
+use std::env;
 use std::marker::PhantomData;
 use std::mem::{self, size_of};
 use std::sync::{
-    atomic::{AtomicU64, Ordering::SeqCst},
-    Arc, MutexGuard,
+    Arc,
+    atomic::{AtomicU64, Ordering::SeqCst}, MutexGuard,
 };
 use std::thread;
 use std::time::Duration;
@@ -12,15 +13,15 @@ use anyhow::{Context, Result};
 use byte_slice_cast::{AsByteSlice, AsMutSliceOf};
 use filecoin_hashers::Hasher;
 use generic_array::{
-    typenum::{Unsigned, U64},
     GenericArray,
+    typenum::{U64, Unsigned},
 };
 use log::{debug, info};
 use mapr::MmapMut;
 use merkletree::store::{DiskStore, Store, StoreConfig};
 use storage_proofs_core::{
     cache_key::CacheKey,
-    drgraph::{Graph, BASE_DEGREE},
+    drgraph::{BASE_DEGREE, Graph},
     merkle::MerkleTreeTrait,
     settings::SETTINGS,
     util::NODE_SIZE,
@@ -30,11 +31,11 @@ use crate::stacked::vanilla::{
     cache::ParentCache,
     cores::{bind_core, checkout_core_group, CoreIndex},
     create_label::{prepare_layers, read_layer, write_layer},
-    graph::{StackedBucketGraph, DEGREE, EXP_DEGREE},
-    memory_handling::{setup_create_label_memory, CacheReader},
+    graph::{DEGREE, EXP_DEGREE, StackedBucketGraph},
+    memory_handling::{CacheReader, setup_create_label_memory},
     params::{Labels, LabelsCache},
     proof::LayerState,
-    utils::{memset, prepare_block, BitMask, RingBuf, UnsafeSlice},
+    utils::{BitMask, memset, prepare_block, RingBuf, UnsafeSlice},
 };
 
 const MIN_BASE_PARENT_NODE: u64 = 2000;
@@ -250,10 +251,18 @@ fn create_layer_labels(
     });
     let base_parent_missing = UnsafeSlice::from_slice(&mut base_parent_missing);
 
+    // fix
+    let mut cpus: String = "0,1,2".to_string();
+    if let Some(c) = env::var("cpus").ok() {
+        cpus = c;
+    }
+    let split: Vec<usize> = cpus.split(",").map(|s| s.to_string().parse::<usize>().unwrap()).collect();
+    let split = &split[1..split.len()];
+
     crossbeam::thread::scope(|s| {
         let mut runners = Vec::with_capacity(num_producers);
 
-        for i in 0..num_producers {
+        for i in split {
             let layer_labels = &layer_labels;
             let exp_labels = exp_labels.as_ref();
             let cur_producer = &cur_producer;
@@ -261,18 +270,19 @@ fn create_layer_labels(
             let ring_buf = &ring_buf;
             let base_parent_missing = &base_parent_missing;
 
-            let core_index = if let Some(cg) = &*core_group {
-                cg.get(i + 1)
-            } else {
-                None
-            };
+            // let core_index = if let Some(cg) = &*core_group {
+            //     cg.get(i + 1)
+            // } else {
+            //     None
+            // };
             runners.push(s.spawn(move |_| {
                 // This could fail, but we will ignore the error if so.
                 // It will be logged as a warning by `bind_core`.
-                debug!("binding core in producer thread {}", i);
+                println!("binding core in producer thread {}", i);
                 // When `_cleanup_handle` is dropped, the previous binding of thread will be restored.
-                let _cleanup_handle = core_index.map(|c| bind_core(*c));
-
+                // let _cleanup_handle = core_index.map(|c| bind_core(*c));
+                let c = CoreIndex::new(*i);
+                let _cleanup_handle = bind_core(c);
                 create_label_runner(
                     parents_cache,
                     layer_labels,
@@ -374,7 +384,8 @@ fn create_layer_labels(
                     // round 7 is only first parent
                     memset(&mut buf[96..128], 0); // Zero out upper half of last block
                     buf[96] = 0x80; // Padding
-                    buf[126] = 0x27; // Length (0x2700 = 9984 bits -> 1248 bytes)
+                    buf[126] = 0x27;
+                    // Length (0x2700 = 9984 bits -> 1248 bytes)
                     compress256!(cur_node_ptr, &buf[64..], 1);
                 } else {
                     // Two rounds of all parents
@@ -403,7 +414,8 @@ fn create_layer_labels(
                     // Final round is only nine parents
                     memset(&mut buf[352..384], 0); // Zero out upper half of last block
                     buf[352] = 0x80; // Padding
-                    buf[382] = 0x27; // Length (0x2700 = 9984 bits -> 1248 bytes)
+                    buf[382] = 0x27;
+                    // Length (0x2700 = 9984 bits -> 1248 bytes)
                     compress256!(cur_node_ptr, &buf[64..], 5);
                 }
 
@@ -431,7 +443,7 @@ fn create_layer_labels(
             runner.join().expect("join failed");
         }
     })
-    .expect("crossbeam scope failure");
+        .expect("crossbeam scope failure");
 }
 
 #[allow(clippy::type_complexity)]
@@ -459,7 +471,14 @@ pub fn create_labels_for_encoding<Tree: 'static + MerkleTreeTrait, T: AsRef<[u8]
         // This could fail, but we will ignore the error if so.
         // It will be logged as a warning by `bind_core`.
         debug!("binding core in main thread");
-        group.get(0).map(|core_index| bind_core(*core_index))
+        let mut cpus: String = "0,1,2".to_string();
+        if let Some(c) = env::var("cpus").ok() {
+            cpus = c;
+        }
+        let split: Vec<usize> = cpus.split(",").map(|s| s.to_string().parse::<usize>().unwrap()).collect();
+        let c = CoreIndex::new(split[0]);
+        bind_core(c);
+        // group.get(0).map(|core_index| bind_core(*core_index))
     });
 
     // NOTE: this means we currently keep 2x sector size around, to improve speed
@@ -633,14 +652,15 @@ pub fn create_labels_for_decoding<Tree: 'static + MerkleTreeTrait, T: AsRef<[u8]
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     use blstrs::Scalar as Fr;
     use ff::PrimeField;
     use filecoin_hashers::poseidon::PoseidonHasher;
     use generic_array::typenum::{U0, U2, U8};
     use storage_proofs_core::{api_version::ApiVersion, merkle::LCTree};
+
     use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn test_create_labels() {
@@ -665,7 +685,7 @@ mod tests {
                 0xe3d51b9afa5ac2b3,
                 0x0462f4f4f1a68d37,
             ]))
-            .expect("create_labels_aux failed"),
+                .expect("create_labels_aux failed"),
         );
         test_create_labels_aux(
             nodes_4k,
@@ -679,7 +699,7 @@ mod tests {
                 0xce239f3b88a894b8,
                 0x234c00d1dc1d53be,
             ]))
-            .expect("create_labels_aux failed"),
+                .expect("create_labels_aux failed"),
         );
 
         test_create_labels_aux(
@@ -694,7 +714,7 @@ mod tests {
                 0x3448959d495490bc,
                 0x06021188c7a71cb5,
             ]))
-            .expect("create_labels_aux failed"),
+                .expect("create_labels_aux failed"),
         );
 
         test_create_labels_aux(
@@ -709,7 +729,7 @@ mod tests {
                 0xc6c03d32c1e42d23,
                 0x0f777c18cc2c55bd,
             ]))
-            .expect("create_labels_aux failed"),
+                .expect("create_labels_aux failed"),
         );
     }
 
@@ -738,13 +758,13 @@ mod tests {
             porep_id,
             api_version,
         )
-        .expect("stacked bucket graph new failed");
+            .expect("stacked bucket graph new failed");
         let cache = graph.parent_cache().expect("parent_cache failed");
 
         let labels = create_labels_for_decoding::<LCTree<PoseidonHasher, U8, U0, U2>, _>(
             &graph, &cache, layers, replica_id, config,
         )
-        .expect("create_labels_for_decoding failed");
+            .expect("create_labels_for_decoding failed");
 
         let final_labels = labels
             .labels_for_last_layer()

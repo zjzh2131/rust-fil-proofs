@@ -1,8 +1,11 @@
-use std::fs::{self, metadata, File, OpenOptions};
+use std::env;
+use std::fs::{self, File, metadata, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::io::Read;
+use std::time::{Duration, Instant};
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, ensure, Result};
 use bellperson::groth16;
 use bincode::{deserialize, serialize};
 use blstrs::{Bls12, Scalar as Fr};
@@ -15,20 +18,17 @@ use sha2::{Digest, Sha256};
 use storage_proofs_core::{
     cache_key::CacheKey,
     compound_proof::{self, CompoundProof},
+    Data,
     drgraph::Graph,
     measurements::{measure_op, Operation},
-    merkle::{create_base_merkle_tree, BinaryMerkleTree, MerkleTreeTrait},
+    merkle::{BinaryMerkleTree, create_base_merkle_tree, MerkleTreeTrait},
     multi_proof::MultiProof,
     parameter_cache::SRS_MAX_PROOFS_TO_AGGREGATE,
     proof::ProofScheme,
     sector::SectorId,
     util::default_rows_to_discard,
-    Data,
 };
-use storage_proofs_porep::stacked::{
-    self, generate_replica_id, ChallengeRequirements, StackedCompound, StackedDrg, Tau,
-    TemporaryAux, TemporaryAuxCache,
-};
+use storage_proofs_porep::stacked::{self, ChallengeRequirements, generate_replica_id, Labels, StackedCompound, StackedDrg, Tau, TemporaryAux, TemporaryAuxCache};
 
 use crate::{
     api::{as_safe_commitment, commitment_from_fr, get_base_tree_leafs, get_base_tree_size},
@@ -43,9 +43,9 @@ use crate::{
     parameters::setup_params,
     pieces::{self, verify_pieces},
     types::{
-        AggregateSnarkProof, Commitment, PaddedBytesAmount, PieceInfo, PoRepConfig,
-        PoRepProofPartitions, ProverId, SealCommitOutput, SealCommitPhase1Output,
-        SealPreCommitOutput, SealPreCommitPhase1Output, SectorSize, Ticket, BINARY_ARITY,
+        AggregateSnarkProof, BINARY_ARITY, Commitment, PaddedBytesAmount, PieceInfo,
+        PoRepConfig, PoRepProofPartitions, ProverId, SealCommitOutput,
+        SealCommitPhase1Output, SealPreCommitOutput, SealPreCommitPhase1Output, SectorSize, Ticket,
     },
 };
 
@@ -60,10 +60,10 @@ pub fn seal_pre_commit_phase1<R, S, T, Tree: 'static + MerkleTreeTrait>(
     ticket: Ticket,
     piece_infos: &[PieceInfo],
 ) -> Result<SealPreCommitPhase1Output<Tree>>
-where
-    R: AsRef<Path>,
-    S: AsRef<Path>,
-    T: AsRef<Path>,
+    where
+        R: AsRef<Path>,
+        S: AsRef<Path>,
+        T: AsRef<Path>,
 {
     info!("seal_pre_commit_phase1:start: {:?}", sector_id);
 
@@ -149,12 +149,25 @@ where
             CacheKey::CommDTree.to_string(),
             default_rows_to_discard(base_tree_leafs, BINARY_ARITY),
         );
-
+        let origin = Path::new(&config.path).parent().unwrap().join("layer11").join(format!(
+            "sc-{:0>2}-data-{}.dat",
+            2, config.id
+        ));
+        if origin.exists() {
+            let link = Path::new(&config.path).join(format!(
+                "sc-{:0>2}-data-{}.dat",
+                2, config.id
+            ));
+            std::os::unix::fs::symlink(&origin, &link).unwrap();
+        }
+        let start = Instant::now();
         let data_tree = create_base_merkle_tree::<BinaryMerkleTree<DefaultPieceHasher>>(
             Some(config.clone()),
             base_tree_leafs,
             &data,
         )?;
+        let duration = start.elapsed();
+        println!("=================================================================Time elapsed in expensive_function() is: {:?}", duration);
         drop(data);
 
         config.size = Some(data_tree.len());
@@ -165,7 +178,6 @@ where
 
         Ok((config, comm_d))
     })?;
-
     trace!("verifying pieces");
 
     ensure!(
@@ -197,6 +209,51 @@ where
     Ok(out)
 }
 
+fn check_layer11(cache: &str) -> bool {
+    for i in 1..=11 {
+        let ok = std::path::Path::new(&format!("{}/sc-02-data-layer-{}.dat", cache, i)).exists();
+        if !ok {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn path_layer11(cache: &str) -> String {
+    Path::new(cache).parent().unwrap().join("layer11").into_os_string().into_string().unwrap()
+}
+
+fn copy_layer11(cache: &str) {
+    let parent = path_layer11(cache);
+    fs::create_dir_all(&parent).unwrap();
+    for i in 1..=11 {
+        let s = format!("sc-02-data-layer-{}.dat", i);
+        let from = format!("{}/{}", cache, s);
+        let to = format!("{}/{}", &parent, s);
+        println!("copy from:{}, to:{}", from, to);
+        fs::copy(from, to).unwrap();
+    }
+}
+
+fn symlink_layer11(cache: &str) {
+    let layer11 = path_layer11(cache);
+    for i in 1..=11 {
+        let s = format!("sc-02-data-layer-{}.dat", i);
+        println!("symlink: original file:{}, link file:{}", format!("{}/{}", cache, s), format!("{}/{}", layer11, s));
+        std::os::unix::fs::symlink(format!("{}/{}", layer11, s), format!("{}/{}", cache, s)).unwrap();
+    }
+}
+
+fn copy_labels(cache: &str, data: &[u8]) {
+    let mut layer11 = path_layer11(cache);
+    fs::create_dir_all(&layer11).unwrap();
+    layer11.push_str("/labels");
+    println!("{}", &layer11);
+    fs::write(layer11, data).unwrap();
+    // let mut f = fs::create_dir_all(layer11).unwrap();
+    // f.write_all(data).unwrap();
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn seal_pre_commit_phase2<R, S, Tree: 'static + MerkleTreeTrait>(
     porep_config: PoRepConfig,
@@ -204,9 +261,9 @@ pub fn seal_pre_commit_phase2<R, S, Tree: 'static + MerkleTreeTrait>(
     cache_path: S,
     replica_path: R,
 ) -> Result<SealPreCommitOutput>
-where
-    R: AsRef<Path>,
-    S: AsRef<Path>,
+    where
+        R: AsRef<Path>,
+        S: AsRef<Path>,
 {
     info!("seal_pre_commit_phase2:start");
 
@@ -536,7 +593,7 @@ pub fn seal_commit_phase2<Tree: 'static + MerkleTreeTrait>(
         seed,
         &buf,
     )
-    .context("post-seal verification sanity check failed")?;
+        .context("post-seal verification sanity check failed")?;
 
     let out = SealCommitOutput { proof: buf };
 
@@ -745,7 +802,7 @@ pub fn aggregate_seal_commit_proofs<Tree: 'static + MerkleTreeTrait>(
                         &commit_output.proof[..],
                         &verifying_key,
                     )?
-                    .circuit_proofs,
+                        .circuit_proofs,
                 );
 
                 Ok(acc)
@@ -1119,7 +1176,7 @@ pub fn verify_batch_seal<Tree: 'static + MerkleTreeTrait>(
                 .expect("unknown sector size") as usize,
         },
     )
-    .map_err(Into::into);
+        .map_err(Into::into);
 
     info!("verify_batch_seal:finish");
     result

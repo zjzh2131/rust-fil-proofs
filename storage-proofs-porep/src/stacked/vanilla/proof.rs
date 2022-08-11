@@ -4,6 +4,7 @@ use std::marker::PhantomData;
 use std::panic::panic_any;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::env;
 
 use anyhow::Context;
 use bincode::deserialize;
@@ -541,13 +542,32 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
             // Override these values with care using environment variables:
             // FIL_PROOFS_MAX_GPU_COLUMN_BATCH_SIZE, FIL_PROOFS_MAX_GPU_TREE_BATCH_SIZE, and
             // FIL_PROOFS_COLUMN_WRITE_BATCH_SIZE respectively.
-            let max_gpu_column_batch_size = SETTINGS.max_gpu_column_batch_size as usize;
-            let max_gpu_tree_batch_size = SETTINGS.max_gpu_tree_batch_size as usize;
+            let mut max_gpu_column_batch_size = SETTINGS.max_gpu_column_batch_size as usize;
+            let mut max_gpu_tree_batch_size = SETTINGS.max_gpu_tree_batch_size as usize;
             let column_write_batch_size = SETTINGS.column_write_batch_size as usize;
+            let mut column_batch: String = "200000".to_string();
+            if let Some(c) = env::var("column_batch").ok() {
+                column_batch = c;
+            }
+            let column_batch = column_batch.parse::<usize>().unwrap();
+            max_gpu_column_batch_size = column_batch;
 
+            let mut tree_batch: String = "700000".to_string();
+            if let Some(c) = env::var("tree_batch").ok() {
+                tree_batch = c;
+            }
+            let tree_batch = tree_batch.parse::<usize>().unwrap();
+            max_gpu_tree_batch_size = tree_batch;
+
+            println!("max_gpu_column_batch_size: {}, max_gpu_tree_batch_size: {}, column_write_batch_size: {}", max_gpu_column_batch_size, max_gpu_tree_batch_size, column_write_batch_size);
             // This channel will receive batches of columns and add them to the ColumnTreeBuilder.
             let (builder_tx, builder_rx) = channel(0);
-
+            let mut gpu_idx: String = "0".to_string();
+            if let Some(c) = env::var("gpu_idx").ok() {
+                gpu_idx = c;
+            }
+            let gpu_idx = gpu_idx.parse::<usize>().unwrap();
+            println!("=========================================size of Fr: {:#?}", std::mem::size_of::<Fr>());
             let config_count = configs.len(); // Don't move config into closure below.
             THREAD_POOL.scoped(|s| {
                 // This channel will receive the finished tree data to be written to disk.
@@ -616,6 +636,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                             );
 
                             let is_final = node_index == nodes_count;
+                            println!("=---------------------------------------------------------=columns.len(): {},columns[0].len(): {}", columns.len(), columns[0].len());
                             builder_tx
                                 .send((columns, is_final))
                                 .expect("failed to send columns");
@@ -624,14 +645,14 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                 });
                 s.execute(move || {
                     let _gpu_lock = GPU_LOCK.lock().expect("failed to get gpu lock");
-                    let tree_batcher = match Batcher::pick_gpu(max_gpu_tree_batch_size) {
+                    let tree_batcher = match Batcher::pick_gpu_idx(max_gpu_tree_batch_size, gpu_idx) {
                         Ok(b) => Some(b),
                         Err(err) => {
                             warn!("no GPU found, falling back to CPU tree builder: {}", err);
                             None
                         }
                     };
-                    let column_batcher = match Batcher::pick_gpu(max_gpu_column_batch_size) {
+                    let column_batcher = match Batcher::pick_gpu_idx(max_gpu_column_batch_size, gpu_idx) {
                         Ok(b) => Some(b),
                         Err(err) => {
                             warn!("no GPU found, falling back to CPU tree builder: {}", err);

@@ -1,7 +1,7 @@
 use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{format_err, Result};
-use hwloc::{Bitmap, ObjectType, Topology, TopologyObject, CPUBIND_THREAD};
+use hwloc::{Bitmap, CPUBIND_THREAD, ObjectType, Topology, TopologyObject};
 use lazy_static::lazy_static;
 use log::{debug, info, warn};
 use storage_proofs_core::settings::SETTINGS;
@@ -21,6 +21,12 @@ lazy_static! {
 /// `CoreIndex` is a simple wrapper type for indexes into the set of vixible cores. A `CoreIndex` should only ever be
 /// created with a value known to be less than the number of visible cores.
 pub struct CoreIndex(usize);
+
+impl CoreIndex {
+    pub fn new(c_idx: usize) -> Self {
+        CoreIndex(c_idx)
+    }
+}
 
 pub fn checkout_core_group() -> Option<MutexGuard<'static, CoreGroup>> {
     match &*CORE_GROUPS {
@@ -101,7 +107,8 @@ pub fn bind_core(core_index: CoreIndex) -> Result<Cleanup> {
     if result.is_err() {
         warn!("error in bind_core, {:?}", result);
     }
-
+    println!("thread id : {}", tid);
+    println!("mapset : {:#?}", before);
     Ok(Cleanup {
         tid,
         prior_state: before,
