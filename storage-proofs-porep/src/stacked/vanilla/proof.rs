@@ -645,14 +645,14 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                 });
                 s.execute(move || {
                     let _gpu_lock = GPU_LOCK.lock().expect("failed to get gpu lock");
-                    let tree_batcher = match Batcher::pick_gpu(max_gpu_tree_batch_size, gpu_idx) {
+                    let tree_batcher = match Batcher::pick_gpu(max_gpu_tree_batch_size) {
                         Ok(b) => Some(b),
                         Err(err) => {
                             warn!("no GPU found, falling back to CPU tree builder: {}", err);
                             None
                         }
                     };
-                    let column_batcher = match Batcher::pick_gpu(max_gpu_column_batch_size, gpu_idx) {
+                    let column_batcher = match Batcher::pick_gpu(max_gpu_column_batch_size) {
                         Ok(b) => Some(b),
                         Err(err) => {
                             warn!("no GPU found, falling back to CPU tree builder: {}", err);
