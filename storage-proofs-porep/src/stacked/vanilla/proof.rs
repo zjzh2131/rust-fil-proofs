@@ -545,29 +545,30 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
             let mut max_gpu_column_batch_size = SETTINGS.max_gpu_column_batch_size as usize;
             let mut max_gpu_tree_batch_size = SETTINGS.max_gpu_tree_batch_size as usize;
             let column_write_batch_size = SETTINGS.column_write_batch_size as usize;
-            let mut column_batch: String = "200000".to_string();
-            if let Some(c) = env::var("column_batch").ok() {
-                column_batch = c;
-            }
-            let column_batch = column_batch.parse::<usize>().unwrap();
-            max_gpu_column_batch_size = column_batch;
+            // let mut column_batch: String = "200000".to_string();
+            // if let Some(c) = env::var("column_batch").ok() {
+            //     column_batch = c;
+            // }
+            // let column_batch = column_batch.parse::<usize>().unwrap();
+            // max_gpu_column_batch_size = column_batch;
+            //
+            // let mut tree_batch: String = "700000".to_string();
+            // if let Some(c) = env::var("tree_batch").ok() {
+            //     tree_batch = c;
+            // }
+            // let tree_batch = tree_batch.parse::<usize>().unwrap();
+            // max_gpu_tree_batch_size = tree_batch;
+            // println!("max_gpu_column_batch_size: {}, max_gpu_tree_batch_size: {}, column_write_batch_size: {}", max_gpu_column_batch_size, max_gpu_tree_batch_size, column_write_batch_size);
 
-            let mut tree_batch: String = "700000".to_string();
-            if let Some(c) = env::var("tree_batch").ok() {
-                tree_batch = c;
-            }
-            let tree_batch = tree_batch.parse::<usize>().unwrap();
-            max_gpu_tree_batch_size = tree_batch;
-
-            println!("max_gpu_column_batch_size: {}, max_gpu_tree_batch_size: {}, column_write_batch_size: {}", max_gpu_column_batch_size, max_gpu_tree_batch_size, column_write_batch_size);
             // This channel will receive batches of columns and add them to the ColumnTreeBuilder.
             let (builder_tx, builder_rx) = channel(0);
             let mut gpu_idx: String = "0".to_string();
             if let Some(c) = env::var("gpu_idx").ok() {
-                gpu_idx = c;
+                if c != "" {
+                    gpu_idx = c;
+                }
             }
             let gpu_idx = gpu_idx.parse::<usize>().unwrap();
-            println!("=========================================size of Fr: {:#?}", std::mem::size_of::<Fr>());
             let config_count = configs.len(); // Don't move config into closure below.
             THREAD_POOL.scoped(|s| {
                 // This channel will receive the finished tree data to be written to disk.
@@ -576,7 +577,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                 s.execute(move || {
                     for i in 0..config_count {
                         let mut node_index = 0;
-                        let builder_tx = builder_tx.clone();
+                        let builder_tx = builder_tx.clodne();
                         while node_index != nodes_count {
                             let chunked_nodes_count =
                                 min(nodes_count - node_index, max_gpu_column_batch_size);
@@ -645,14 +646,14 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                 });
                 s.execute(move || {
                     let _gpu_lock = GPU_LOCK.lock().expect("failed to get gpu lock");
-                    let tree_batcher = match Batcher::pick_gpu(max_gpu_tree_batch_size) {
+                    let tree_batcher = match Batcher::pick_gpu_idx(max_gpu_tree_batch_size, gpu_idx) {
                         Ok(b) => Some(b),
                         Err(err) => {
                             warn!("no GPU found, falling back to CPU tree builder: {}", err);
                             None
                         }
                     };
-                    let column_batcher = match Batcher::pick_gpu(max_gpu_column_batch_size) {
+                    let column_batcher = match Batcher::pick_gpu_idx(max_gpu_column_batch_size, gpu_idx) {
                         Ok(b) => Some(b),
                         Err(err) => {
                             warn!("no GPU found, falling back to CPU tree builder: {}", err);
@@ -803,7 +804,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
 
             let mut trees = Vec::with_capacity(tree_count);
             for (i, config) in configs.iter().enumerate() {
-                let mut hashes: Vec<<Tree::Hasher as Hasher>::Domain> =
+                let mut hashes: Vec<<Tree::Hasher as Hasher>::Domain> =/
                     vec![<Tree::Hasher as Hasher>::Domain::default(); nodes_count];
 
                 THREAD_POOL.scoped(|s| {
@@ -1050,6 +1051,12 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
         let configs = &configs;
         let tree_r_last_config = &tree_r_last_config;
 
+        let mut gpu_idx: String = "0".to_string();
+        if let Some(c) = env::var("gpu_idx").ok() {
+            gpu_idx = c;
+        }
+        let gpu_idx = gpu_idx.parse::<usize>().unwrap();
+
         THREAD_POOL.scoped(|s| {
             // This channel will receive the finished tree data to be written to disk.
             let (writer_tx, writer_rx) = channel::<Vec<Fr>>(0);
@@ -1097,7 +1104,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
             });
             s.execute(move || {
                 let _gpu_lock = GPU_LOCK.lock().expect("failed to get gpu lock");
-                let batcher = match Batcher::pick_gpu(max_gpu_tree_batch_size) {
+                let batcher = match Batcher::pick_gpu_idx(max_gpu_tree_batch_size, gpu_idx) {
                     Ok(b) => Some(b),
                     Err(err) => {
                         warn!("no GPU found, falling back to CPU tree builder: {}", err);

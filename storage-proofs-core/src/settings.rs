@@ -38,7 +38,7 @@ impl Default for Settings {
             verify_cache: false,
             verify_production_params: false,
             use_gpu_column_builder: false,
-            max_gpu_column_batch_size: 200_000,
+            max_gpu_column_batch_size: 400_000,
             column_write_batch_size: 262_144,
             use_gpu_tree_builder: false,
             max_gpu_tree_batch_size: 700_000,
